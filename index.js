@@ -3,6 +3,10 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config()
 const { MongoClient, ServerApiVersion } = require('mongodb');
+var nodemailer = require('nodemailer');
+var sgTransport = require('nodemailer-sendgrid-transport');
+
+
 const app = express()
 const port = process.env.PORT || 5000;
 
@@ -20,7 +24,7 @@ function verifyJWT(req, res, next) {
     }
     const token = authHeader.split(' ')[1];
     jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, function (err, decoded) {
-        if(err){
+        if (err) {
             return res.status(403).send({ message: 'forbidden access' })
         }
         req.decoded = decoded;
@@ -28,12 +32,67 @@ function verifyJWT(req, res, next) {
     });
 }
 
+//email sender 
+
+const emailSenderOptions = {
+    auth: {
+        api_key: process.env.EMAIL_SENDER_KEY
+    }
+}
+const emailClient = nodemailer.createTransport(sgTransport(emailSenderOptions));
+
+function sendAppointmentEmail(booking) {
+    console.log('sending email');
+    const {patien, patienName, treatment, date, slot   } = booking;
+
+    var email = {
+        from: process.env.EMAIL_SENDER,
+        to: patien,
+        subject: `Your Appoinment for ${treatment} is on ${date} at ${slot} is confirmed`,
+        text: `Your Appoinment for ${treatment} is on ${date} at ${slot} is confirmed`,
+        html: `
+        <div>
+        <p> Hello ${patienName},</p>
+        <h3>Your Appoinment for ${treatment} is Confirmed</h3>
+        <p>looking forward to see on${date} at ${slot} </P>
+        <p>Our Address:</P>
+        <p>Woodside, Quuens</P>
+        <p>New York</P>
+        <p>11377</P>
+        <a href="https://web.programming-hero.com/">unsubscribed</a>
+        </div>
+        `
+      };
+      emailClient.sendMail(email, function(err, info){
+        if (err ){
+          console.log(err);
+        }
+        else {
+          console.log('Message sent: ', info);
+        }
+    });
+}
+
+
+
 async function run() {
     try {
         await client.connect();
         const serviceCollection = client.db("doctors_portal").collection("services");
         const bookingCollection = client.db("doctors_portal").collection("bookings");
         const userCollection = client.db("doctors_portal").collection("users");
+        const doctorCollection = client.db("doctors_portal").collection("doctors");
+
+        const verifyAdmin = async (req, res, next) => {
+            const requester = req.decoded.email;
+            const requesterAccount = await userCollection.findOne({ email: requester });
+            if (requesterAccount.role === 'admin') {
+                next();
+            }
+            else {
+                return res.status(403).send({ message: 'forbiden access' })
+            }
+        }
 
 
         app.get('/service', async (req, res) => {
@@ -43,35 +102,30 @@ async function run() {
             res.send(services)
         });
 
-        app.get('/user', verifyJWT, async(req, res)=>{
+        app.get('/user', verifyJWT, async (req, res) => {
             const users = await userCollection.find().toArray();
             res.send(users);
         });
 
-        app.get('/admin/:email', async(req, res)=>{
+        app.get('/admin/:email', async (req, res) => {
             const email = req.params.email;
-            const user = await userCollection.findOne({email: email});
+            const user = await userCollection.findOne({ email: email });
             const isAdmin = user.role === 'admin';
-            res.send({admin: isAdmin})
+            res.send({ admin: isAdmin })
         })
 
-        
-        app.put('/user/admin/:email', verifyJWT, async (req, res) => {
+
+        app.put('/user/admin/:email', verifyJWT, verifyAdmin, async (req, res) => {
             const email = req.params.email;
-            const requester = req.decoded.email;
-            const requesterAccount = await userCollection.findOne({email: requester});
-            if(requesterAccount.role === 'admin'){
-                const filter = { email: email };
-                const updateDoc = {
-                    $set: {role: 'admin'}
-                };
-                const result = await userCollection.updateOne(filter, updateDoc);
-                res.send( result);
-            }
-            else{
-                res.status(403).send({message: 'forbiden'})
-            }
-         
+            const filter = { email: email };
+            const updateDoc = {
+                $set: { role: 'admin' }
+            };
+            const result = await userCollection.updateOne(filter, updateDoc);
+            res.send(result);
+
+
+
         })
 
 
@@ -117,16 +171,24 @@ async function run() {
         app.get('/booking', verifyJWT, async (req, res) => {
             const patien = req.query.patien;
             const decodedEmail = req.decoded.email;
-            if(patien === decodedEmail){
+            if (patien === decodedEmail) {
                 const query = { patien: patien };
                 const bookings = await bookingCollection.find(query).toArray();
-               return res.send(bookings);
+                return res.send(bookings);
             }
-            else{
-                return res.status(403).send({message: 'forbiden access'})
+            else {
+                return res.status(403).send({ message: 'forbiden access' })
             }
-   
+
         })
+
+
+        //manage doctors
+        app.get('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
+            const doctors = await doctorCollection.find().toArray();
+            res.send(doctors);
+        })
+
 
         //insert booking in db
         app.post('/booking', async (req, res) => {
@@ -137,8 +199,23 @@ async function run() {
                 return res.send({ success: false, booking: exists })
             }
             const result = await bookingCollection.insertOne(booking);
+            sendAppointmentEmail(booking)
             return res.send({ success: true, result });
         })
+        // add new docotr in database
+        app.post('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
+            const doctor = req.body;
+            const result = await doctorCollection.insertOne(doctor);
+            res.send(result)
+        })
+
+        app.delete('/doctor/:email', verifyJWT, verifyAdmin, async (req, res) => {
+            const email = req.params.email;
+            const filter = { email: email };
+            const result = await doctorCollection.deleteOne(filter);
+            res.send(result)
+        })
+
     }
     finally {
 
